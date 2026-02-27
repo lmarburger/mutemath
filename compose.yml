@@ -1,0 +1,7 @@
+services:
+  mutemath:
+    build: .
+    environment:
+      - GH_TOKEN
+    command: ["--apply", "--daemon"]
+    restart: unless-stopped
