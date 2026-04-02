@@ -3,5 +3,6 @@ services:
     build: .
     environment:
       - GH_TOKEN
+      - MODE
     command: ["--apply", "--daemon", "--verbose"]
     restart: unless-stopped

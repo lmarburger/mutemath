@@ -387,6 +387,40 @@ func TestCountByAction(t *testing.T) {
 	}
 }
 
+func TestParseMode(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    Mode
+		wantErr bool
+	}{
+		{input: "", want: ModeRead},
+		{input: "read", want: ModeRead},
+		{input: "READ", want: ModeRead},
+		{input: "done", want: ModeDone},
+		{input: "Done", want: ModeDone},
+		{input: "invalid", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("input=%q", tt.input), func(t *testing.T) {
+			got, err := ParseMode(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ParseMode(%q) = %v, want error", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ParseMode(%q) error = %v", tt.input, err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("ParseMode(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatDecisionRow(t *testing.T) {
 	d := Decision{
 		Notification: Notification{
@@ -415,15 +449,22 @@ func TestFormatMutationRow(t *testing.T) {
 		Action: ActionMute,
 	}
 
-	t.Run("success", func(t *testing.T) {
-		output := FormatMutationRow(d, nil)
-		if !strings.Contains(output, "MUTED") || !strings.Contains(output, "org/repo#42") {
+	t.Run("read mode success", func(t *testing.T) {
+		output := FormatMutationRow(d, ModeRead, nil)
+		if !strings.Contains(output, "READ") || !strings.Contains(output, "org/repo#42") {
+			t.Errorf("unexpected output: %s", output)
+		}
+	})
+
+	t.Run("done mode success", func(t *testing.T) {
+		output := FormatMutationRow(d, ModeDone, nil)
+		if !strings.Contains(output, "DONE") || !strings.Contains(output, "org/repo#42") {
 			t.Errorf("unexpected output: %s", output)
 		}
 	})
 
 	t.Run("error", func(t *testing.T) {
-		output := FormatMutationRow(d, fmt.Errorf("mark-read failed: 500"))
+		output := FormatMutationRow(d, ModeRead, fmt.Errorf("mark-read failed: 500"))
 		if !strings.Contains(output, "ERROR") || !strings.Contains(output, "mark-read failed") {
 			t.Errorf("unexpected output: %s", output)
 		}
@@ -432,26 +473,33 @@ func TestFormatMutationRow(t *testing.T) {
 
 func TestFormatSummary(t *testing.T) {
 	t.Run("dry run", func(t *testing.T) {
-		output := FormatSummary(10, 0, 3, 7, 0)
+		output := FormatSummary(10, 0, 3, 7, 0, ModeRead)
 		if !strings.Contains(output, "10 scanned") || !strings.Contains(output, "3 kept") || !strings.Contains(output, "7 skipped") {
 			t.Errorf("unexpected output: %s", output)
 		}
 	})
 
-	t.Run("apply with errors", func(t *testing.T) {
-		output := FormatSummary(10, 8, 2, 0, 1)
-		if !strings.Contains(output, "10 scanned") || !strings.Contains(output, "8 muted") || !strings.Contains(output, "1 errors") {
+	t.Run("read mode with errors", func(t *testing.T) {
+		output := FormatSummary(10, 8, 2, 0, 1, ModeRead)
+		if !strings.Contains(output, "10 scanned") || !strings.Contains(output, "8 read") || !strings.Contains(output, "1 errors") {
 			t.Errorf("unexpected output: %s", output)
 		}
 	})
 
-	t.Run("apply no errors", func(t *testing.T) {
-		output := FormatSummary(10, 5, 3, 2, 0)
-		if !strings.Contains(output, "10 scanned") || !strings.Contains(output, "5 muted") {
+	t.Run("read mode no errors", func(t *testing.T) {
+		output := FormatSummary(10, 5, 3, 2, 0, ModeRead)
+		if !strings.Contains(output, "10 scanned") || !strings.Contains(output, "5 read") {
 			t.Errorf("unexpected output: %s", output)
 		}
 		if strings.Contains(output, "errors") {
 			t.Errorf("should not mention errors when there are none: %s", output)
+		}
+	})
+
+	t.Run("done mode", func(t *testing.T) {
+		output := FormatSummary(10, 5, 3, 2, 0, ModeDone)
+		if !strings.Contains(output, "5 done") {
+			t.Errorf("unexpected output: %s", output)
 		}
 	})
 }
@@ -460,16 +508,24 @@ func TestFormatDaemonCycleSummary(t *testing.T) {
 	now := time.Date(2026, 2, 27, 10, 0, 0, 0, time.UTC)
 
 	t.Run("not modified", func(t *testing.T) {
-		output := FormatDaemonCycleSummary(now, 0, 0, 0, true)
+		output := FormatDaemonCycleSummary(now, 0, 0, 0, true, ModeRead)
 		want := "2026-02-27T10:00:00Z  cycle: not modified\n"
 		if output != want {
 			t.Errorf("got %q, want %q", output, want)
 		}
 	})
 
-	t.Run("with results", func(t *testing.T) {
-		output := FormatDaemonCycleSummary(now, 3, 2, 0, false)
-		want := "2026-02-27T10:00:00Z  cycle: 3 scanned, 2 muted, 0 errors\n"
+	t.Run("read mode", func(t *testing.T) {
+		output := FormatDaemonCycleSummary(now, 3, 2, 0, false, ModeRead)
+		want := "2026-02-27T10:00:00Z  cycle: 3 scanned, 2 read, 0 errors\n"
+		if output != want {
+			t.Errorf("got %q, want %q", output, want)
+		}
+	})
+
+	t.Run("done mode", func(t *testing.T) {
+		output := FormatDaemonCycleSummary(now, 3, 2, 0, false, ModeDone)
+		want := "2026-02-27T10:00:00Z  cycle: 3 scanned, 2 done, 0 errors\n"
 		if output != want {
 			t.Errorf("got %q, want %q", output, want)
 		}

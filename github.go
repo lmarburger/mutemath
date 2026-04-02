@@ -272,6 +272,21 @@ func (c *GitHubClient) MarkThreadRead(threadID string) error {
 	return nil
 }
 
+// MarkThreadDone marks a notification thread as done, removing it from the inbox.
+func (c *GitHubClient) MarkThreadDone(threadID string) error {
+	url := fmt.Sprintf("https://api.github.com/notifications/threads/%s", threadID)
+	resp, err := c.do("DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("mark thread %s done: %w", threadID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("mark thread %s done: unexpected status %d", threadID, resp.StatusCode)
+	}
+	return nil
+}
+
 // IgnoreThread mutes/ignores a notification thread.
 func (c *GitHubClient) IgnoreThread(threadID string) error {
 	url := fmt.Sprintf("https://api.github.com/notifications/threads/%s/subscription", threadID)

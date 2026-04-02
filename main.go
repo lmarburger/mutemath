@@ -35,6 +35,12 @@ func run() int {
 		return 1
 	}
 
+	mode, err := core.ParseMode(os.Getenv("MODE"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		return 1
+	}
+
 	client := NewGitHubClient(token)
 
 	if err := client.FetchLogin(); err != nil {
@@ -47,9 +53,9 @@ func run() int {
 	}
 
 	if *daemon {
-		return runDaemon(client, cfg, *apply, *verbose)
+		return runDaemon(client, cfg, mode, *apply, *verbose)
 	}
-	return runOnce(client, cfg, *apply, *verbose)
+	return runOnce(client, cfg, mode, *apply, *verbose)
 }
 
 func resolveToken() (string, error) {
@@ -60,7 +66,7 @@ func resolveToken() (string, error) {
 	return token, nil
 }
 
-func runOnce(client *GitHubClient, cfg core.Config, apply, verbose bool) int {
+func runOnce(client *GitHubClient, cfg core.Config, mode core.Mode, apply, verbose bool) int {
 	result, err := client.ListUnreadNotifications("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
@@ -80,10 +86,10 @@ func runOnce(client *GitHubClient, cfg core.Config, apply, verbose bool) int {
 		fmt.Println()
 	}
 
-	decisions, errCount := processNotifications(client, cfg, result.Notifications, apply, verbose)
+	decisions, errCount := processNotifications(client, cfg, mode, result.Notifications, apply, verbose)
 
 	skip, keep, mute := core.CountByAction(decisions)
-	fmt.Println(core.FormatSummary(len(decisions), mute-errCount, keep, skip, errCount))
+	fmt.Println(core.FormatSummary(len(decisions), mute-errCount, keep, skip, errCount, mode))
 
 	if errCount > 0 {
 		return 1
@@ -91,7 +97,7 @@ func runOnce(client *GitHubClient, cfg core.Config, apply, verbose bool) int {
 	return 0
 }
 
-func runDaemon(client *GitHubClient, cfg core.Config, apply, verbose bool) int {
+func runDaemon(client *GitHubClient, cfg core.Config, mode core.Mode, apply, verbose bool) int {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
@@ -116,16 +122,16 @@ func runDaemon(client *GitHubClient, cfg core.Config, apply, verbose bool) int {
 
 			if result.NotModified {
 				if verbose {
-					fmt.Print(core.FormatDaemonCycleSummary(now, 0, 0, 0, true))
+					fmt.Print(core.FormatDaemonCycleSummary(now, 0, 0, 0, true, mode))
 				}
 			} else if len(result.Notifications) == 0 {
 				if verbose {
-					fmt.Print(core.FormatDaemonCycleSummary(now, 0, 0, 0, false))
+					fmt.Print(core.FormatDaemonCycleSummary(now, 0, 0, 0, false, mode))
 				}
 			} else {
-				decisions, errCount := processNotifications(client, cfg, result.Notifications, apply, verbose)
+				decisions, errCount := processNotifications(client, cfg, mode, result.Notifications, apply, verbose)
 				_, _, muted := core.CountByAction(decisions)
-				fmt.Print(core.FormatDaemonCycleSummary(now, len(decisions), muted-errCount, errCount, false))
+				fmt.Print(core.FormatDaemonCycleSummary(now, len(decisions), muted-errCount, errCount, false, mode))
 			}
 		}
 
@@ -141,7 +147,7 @@ func runDaemon(client *GitHubClient, cfg core.Config, apply, verbose bool) int {
 
 // processNotifications classifies and optionally mutates notifications one at a time,
 // printing each result as it goes. Returns all decisions and the error count.
-func processNotifications(client *GitHubClient, cfg core.Config, notifications []core.Notification, apply, verbose bool) ([]core.Decision, int) {
+func processNotifications(client *GitHubClient, cfg core.Config, mode core.Mode, notifications []core.Notification, apply, verbose bool) ([]core.Decision, int) {
 	reviewersByURL := make(map[string]*core.Reviewers)
 	decisions := make([]core.Decision, 0, len(notifications))
 	errCount := 0
@@ -168,15 +174,25 @@ func processNotifications(client *GitHubClient, cfg core.Config, notifications [
 		// Print and optionally mutate.
 		if apply && d.Action == core.ActionMute {
 			var mutErr error
-			if err := client.MarkThreadRead(d.Notification.ID); err != nil {
-				mutErr = err
-			} else if err := client.IgnoreThread(d.Notification.ID); err != nil {
-				mutErr = err
+			switch mode {
+			case core.ModeDone:
+				if err := client.MarkThreadDone(d.Notification.ID); err != nil {
+					mutErr = err
+				}
+			default:
+				if err := client.MarkThreadRead(d.Notification.ID); err != nil {
+					mutErr = err
+				}
+			}
+			if mutErr == nil {
+				if err := client.IgnoreThread(d.Notification.ID); err != nil {
+					mutErr = err
+				}
 			}
 			if mutErr != nil {
 				errCount++
 			}
-			fmt.Println(core.FormatMutationRow(d, mutErr))
+			fmt.Println(core.FormatMutationRow(d, mode, mutErr))
 		} else if !apply {
 			fmt.Println(core.FormatDecisionRow(d))
 		}

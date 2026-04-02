@@ -70,6 +70,38 @@ type Config struct {
 	ExcludeOrg string
 }
 
+type Mode int
+
+const (
+	ModeRead Mode = iota
+	ModeDone
+)
+
+func ParseMode(s string) (Mode, error) {
+	switch strings.ToLower(s) {
+	case "", "read":
+		return ModeRead, nil
+	case "done":
+		return ModeDone, nil
+	default:
+		return 0, fmt.Errorf("invalid MODE %q (valid values: read, done)", s)
+	}
+}
+
+func (m Mode) ActionLabel() string {
+	if m == ModeDone {
+		return "DONE"
+	}
+	return "READ"
+}
+
+func (m Mode) ActionLabelLower() string {
+	if m == ModeDone {
+		return "done"
+	}
+	return "read"
+}
+
 // ParseSubjectURL extracts owner, repo, and PR number from a GitHub API URL
 // like "https://api.github.com/repos/org/repo/pulls/42".
 func ParseSubjectURL(url string) (PRRef, error) {
@@ -167,23 +199,24 @@ func FormatDecisionRow(d Decision) string {
 }
 
 // FormatMutationRow formats a single mutation result as a line for apply output.
-func FormatMutationRow(d Decision, err error) string {
+func FormatMutationRow(d Decision, mode Mode, err error) string {
 	label := formatLabel(d)
 	if err != nil {
 		return fmt.Sprintf("ERROR  %s  %q  %s", label, d.Notification.Subject.Title, err)
 	}
-	return fmt.Sprintf("MUTED  %s  %q", label, d.Notification.Subject.Title)
+	return fmt.Sprintf("%-5s  %s  %q", mode.ActionLabel(), label, d.Notification.Subject.Title)
 }
 
 // FormatSummary renders a final summary line from counts.
-func FormatSummary(scanned, muted, kept, skipped, errors int) string {
+func FormatSummary(scanned, actioned, kept, skipped, errors int, mode Mode) string {
+	label := mode.ActionLabelLower()
 	if errors > 0 {
-		return fmt.Sprintf("\nDone: %d scanned, %d muted, %d errors", scanned, muted, errors)
+		return fmt.Sprintf("\nDone: %d scanned, %d %s, %d errors", scanned, actioned, label, errors)
 	}
-	if muted > 0 {
-		return fmt.Sprintf("\nDone: %d scanned, %d muted", scanned, muted)
+	if actioned > 0 {
+		return fmt.Sprintf("\nDone: %d scanned, %d %s", scanned, actioned, label)
 	}
-	return fmt.Sprintf("\nSummary: %d scanned, %d spam, %d kept, %d skipped", scanned, muted, kept, skipped)
+	return fmt.Sprintf("\nSummary: %d scanned, %d spam, %d kept, %d skipped", scanned, actioned, kept, skipped)
 }
 
 func formatLabel(d Decision) string {
@@ -195,10 +228,10 @@ func formatLabel(d Decision) string {
 }
 
 // FormatDaemonCycleSummary renders a one-line timestamped cycle summary.
-func FormatDaemonCycleSummary(now time.Time, scanned, muted, errCount int, notModified bool) string {
+func FormatDaemonCycleSummary(now time.Time, scanned, actioned, errCount int, notModified bool, mode Mode) string {
 	ts := now.UTC().Format(time.RFC3339)
 	if notModified {
 		return fmt.Sprintf("%s  cycle: not modified\n", ts)
 	}
-	return fmt.Sprintf("%s  cycle: %d scanned, %d muted, %d errors\n", ts, scanned, muted, errCount)
+	return fmt.Sprintf("%s  cycle: %d scanned, %d %s, %d errors\n", ts, scanned, actioned, mode.ActionLabelLower(), errCount)
 }
