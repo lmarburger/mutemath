@@ -1,0 +1,13 @@
+# Secrets: never send these to the build daemon.
+.env
+.envrc
+
+# Not needed to build the binary.
+.git
+.github
+.idea
+.claude
+
+# Local build output; the image builds its own.
+mutemath
+*.test
