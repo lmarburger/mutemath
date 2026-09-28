@@ -86,12 +86,16 @@ func runOnce(client *GitHubClient, cfg core.Config, mode core.Mode, apply, verbo
 		fmt.Println()
 	}
 
-	decisions, errCount := processNotifications(client, cfg, mode, result.Notifications, apply, verbose)
+	decisions, stats := processNotifications(client, cfg, mode, result.Notifications, apply, verbose)
 
 	skip, keep, mute := core.CountByAction(decisions)
-	fmt.Println(core.FormatSummary(len(decisions), mute-errCount, keep, skip, errCount, mode))
+	fmt.Println(core.FormatSummary(len(decisions), mute-stats.Errors, keep, skip, stats.Errors, mode))
 
-	if errCount > 0 {
+	if stats.ShouldStop() {
+		fmt.Fprintln(os.Stderr, lookupsDeniedMessage)
+		return 1
+	}
+	if stats.Errors > 0 {
 		return 1
 	}
 	return 0
@@ -111,6 +115,10 @@ func runDaemon(client *GitHubClient, cfg core.Config, mode core.Mode, apply, ver
 		now := time.Now()
 
 		if err != nil {
+			if core.IsFatal(err) {
+				log.Printf("fatal: %s", err)
+				return 1
+			}
 			log.Printf("cycle error: %s", err)
 		} else {
 			if result.LastModified != "" {
@@ -122,16 +130,19 @@ func runDaemon(client *GitHubClient, cfg core.Config, mode core.Mode, apply, ver
 
 			if result.NotModified {
 				if verbose {
-					fmt.Print(core.FormatDaemonCycleSummary(now, 0, 0, 0, true, mode))
+					fmt.Print(core.FormatDaemonCycleSummary(now, core.CycleStats{NotModified: true}, mode))
 				}
 			} else if len(result.Notifications) == 0 {
 				if verbose {
-					fmt.Print(core.FormatDaemonCycleSummary(now, 0, 0, 0, false, mode))
+					fmt.Print(core.FormatDaemonCycleSummary(now, core.CycleStats{}, mode))
 				}
 			} else {
-				decisions, errCount := processNotifications(client, cfg, mode, result.Notifications, apply, verbose)
-				_, _, muted := core.CountByAction(decisions)
-				fmt.Print(core.FormatDaemonCycleSummary(now, len(decisions), muted-errCount, errCount, false, mode))
+				_, stats := processNotifications(client, cfg, mode, result.Notifications, apply, verbose)
+				fmt.Print(core.FormatDaemonCycleSummary(now, stats, mode))
+				if stats.ShouldStop() {
+					log.Printf("fatal: %s", lookupsDeniedMessage)
+					return 1
+				}
 			}
 		}
 
@@ -145,19 +156,26 @@ func runDaemon(client *GitHubClient, cfg core.Config, mode core.Mode, apply, ver
 	}
 }
 
+const lookupsDeniedMessage = "every reviewer lookup was denied; check the token's scopes and SSO authorization"
+
 // processNotifications classifies and optionally mutates notifications one at a time,
-// printing each result as it goes. Returns all decisions and the error count.
-func processNotifications(client *GitHubClient, cfg core.Config, mode core.Mode, notifications []core.Notification, apply, verbose bool) ([]core.Decision, int) {
+// printing each result as it goes. Returns all decisions and the cycle's stats.
+func processNotifications(client *GitHubClient, cfg core.Config, mode core.Mode, notifications []core.Notification, apply, verbose bool) ([]core.Decision, core.CycleStats) {
 	reviewersByURL := make(map[string]*core.Reviewers)
 	decisions := make([]core.Decision, 0, len(notifications))
-	errCount := 0
+	var stats core.CycleStats
 
 	for _, n := range notifications {
 		// Fetch reviewer data if needed (with dedup).
 		if core.NeedsReviewerLookup(n, cfg) {
 			if _, ok := reviewersByURL[n.Subject.URL]; !ok {
+				stats.LookupsAttempted++
 				reviewers, err := client.GetRequestedReviewers(n.Subject.URL)
 				if err != nil {
+					stats.LookupsFailed++
+					if core.IsFatal(err) {
+						stats.LookupsDenied++
+					}
 					if verbose {
 						log.Printf("warning: %s", err)
 					}
@@ -190,7 +208,7 @@ func processNotifications(client *GitHubClient, cfg core.Config, mode core.Mode,
 				}
 			}
 			if mutErr != nil {
-				errCount++
+				stats.Errors++
 			}
 			fmt.Println(core.FormatMutationRow(d, mode, mutErr))
 		} else if !apply {
@@ -198,5 +216,8 @@ func processNotifications(client *GitHubClient, cfg core.Config, mode core.Mode,
 		}
 	}
 
-	return decisions, errCount
+	_, _, mute := core.CountByAction(decisions)
+	stats.Scanned = len(decisions)
+	stats.Actioned = mute - stats.Errors
+	return decisions, stats
 }

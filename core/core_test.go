@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -507,28 +508,103 @@ func TestFormatSummary(t *testing.T) {
 func TestFormatDaemonCycleSummary(t *testing.T) {
 	now := time.Date(2026, 2, 27, 10, 0, 0, 0, time.UTC)
 
-	t.Run("not modified", func(t *testing.T) {
-		output := FormatDaemonCycleSummary(now, 0, 0, 0, true, ModeRead)
-		want := "2026-02-27T10:00:00Z  cycle: not modified\n"
-		if output != want {
-			t.Errorf("got %q, want %q", output, want)
-		}
-	})
+	tests := []struct {
+		name  string
+		stats CycleStats
+		mode  Mode
+		want  string
+	}{
+		{
+			name:  "not modified",
+			stats: CycleStats{NotModified: true},
+			mode:  ModeRead,
+			want:  "2026-02-27T10:00:00Z  cycle: not modified\n",
+		},
+		{
+			name:  "read mode",
+			stats: CycleStats{Scanned: 3, Actioned: 2},
+			mode:  ModeRead,
+			want:  "2026-02-27T10:00:00Z  cycle: 3 scanned, 2 read, 0 errors\n",
+		},
+		{
+			name:  "done mode",
+			stats: CycleStats{Scanned: 3, Actioned: 2},
+			mode:  ModeDone,
+			want:  "2026-02-27T10:00:00Z  cycle: 3 scanned, 2 done, 0 errors\n",
+		},
+		{
+			name:  "successful lookups are not mentioned",
+			stats: CycleStats{Scanned: 3, Actioned: 2, LookupsAttempted: 3},
+			mode:  ModeDone,
+			want:  "2026-02-27T10:00:00Z  cycle: 3 scanned, 2 done, 0 errors\n",
+		},
+		{
+			name:  "some lookups failed",
+			stats: CycleStats{Scanned: 3, Actioned: 1, LookupsAttempted: 3, LookupsFailed: 2, LookupsDenied: 2},
+			mode:  ModeDone,
+			want:  "2026-02-27T10:00:00Z  cycle: 3 scanned, 1 done, 0 errors, 2/3 reviewer lookups failed\n",
+		},
+		{
+			name:  "every lookup failed",
+			stats: CycleStats{Scanned: 2, LookupsAttempted: 2, LookupsFailed: 2, LookupsDenied: 2},
+			mode:  ModeDone,
+			want:  "2026-02-27T10:00:00Z  cycle: 2 scanned, 0 done, 0 errors, 2/2 reviewer lookups failed\n",
+		},
+	}
 
-	t.Run("read mode", func(t *testing.T) {
-		output := FormatDaemonCycleSummary(now, 3, 2, 0, false, ModeRead)
-		want := "2026-02-27T10:00:00Z  cycle: 3 scanned, 2 read, 0 errors\n"
-		if output != want {
-			t.Errorf("got %q, want %q", output, want)
-		}
-	})
-
-	t.Run("done mode", func(t *testing.T) {
-		output := FormatDaemonCycleSummary(now, 3, 2, 0, false, ModeDone)
-		want := "2026-02-27T10:00:00Z  cycle: 3 scanned, 2 done, 0 errors\n"
-		if output != want {
-			t.Errorf("got %q, want %q", output, want)
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FormatDaemonCycleSummary(now, tt.stats, tt.mode); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
+func TestCycleStatsShouldStop(t *testing.T) {
+	tests := []struct {
+		name  string
+		stats CycleStats
+		want  bool
+	}{
+		{name: "no lookups attempted", stats: CycleStats{Scanned: 5}},
+		{name: "all lookups succeeded", stats: CycleStats{LookupsAttempted: 3}},
+		{name: "all denied", stats: CycleStats{LookupsAttempted: 3, LookupsFailed: 3, LookupsDenied: 3}, want: true},
+		{name: "all failed, some denied", stats: CycleStats{LookupsAttempted: 3, LookupsFailed: 3, LookupsDenied: 1}, want: true},
+		{name: "all failed but none denied", stats: CycleStats{LookupsAttempted: 3, LookupsFailed: 3}},
+		{name: "one repo denied among successes", stats: CycleStats{LookupsAttempted: 3, LookupsFailed: 1, LookupsDenied: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.stats.ShouldStop(); got != tt.want {
+				t.Errorf("ShouldStop() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsFatal(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil},
+		{name: "sentinel", err: ErrAuth, want: true},
+		{name: "wrapped", err: fmt.Errorf("list notifications page 1: status 401: %w", ErrAuth), want: true},
+		{name: "wrapped twice", err: fmt.Errorf("cycle: %w", fmt.Errorf("status 401: %w", ErrAuth)), want: true},
+		{name: "access sentinel", err: ErrAccess, want: true},
+		{name: "wrapped access", err: fmt.Errorf("get reviewers for o/r#1: status 403: %w", ErrAccess), want: true},
+		{name: "network error", err: errors.New("dial tcp: connection refused"), want: false},
+		{name: "unwrapped 401 text", err: errors.New("unexpected status 401"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsFatal(tt.err); got != tt.want {
+				t.Errorf("IsFatal(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}

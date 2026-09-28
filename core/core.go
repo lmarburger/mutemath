@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -100,6 +101,20 @@ func (m Mode) ActionLabelLower() string {
 		return "done"
 	}
 	return "read"
+}
+
+// ErrAuth marks a credential the server rejected: invalid, expired, or revoked.
+// Unlike a network failure, it will not succeed on a later attempt.
+var ErrAuth = errors.New("token rejected: invalid, expired, or revoked")
+
+// ErrAccess marks a credential the server accepted but that lacks rights to the
+// resource, such as a missing scope or an un-authorized SSO organization.
+var ErrAccess = errors.New("token lacks access: missing scope or SSO authorization")
+
+// IsFatal reports whether an error will persist across retries, meaning a
+// long-running caller should stop rather than poll again.
+func IsFatal(err error) bool {
+	return errors.Is(err, ErrAuth) || errors.Is(err, ErrAccess)
 }
 
 // ParseSubjectURL extracts owner, repo, and PR number from a GitHub API URL
@@ -227,11 +242,36 @@ func formatLabel(d Decision) string {
 	return fmt.Sprintf("%s#%d", d.Notification.Repository.FullName, ref.Number)
 }
 
+// CycleStats summarizes the work done in a single pass over a set of notifications.
+type CycleStats struct {
+	Scanned          int
+	Actioned         int
+	Errors           int // mutation failures
+	LookupsAttempted int
+	LookupsFailed    int
+	LookupsDenied    int // subset of LookupsFailed the server refused on credential grounds
+	NotModified      bool
+}
+
+// ShouldStop reports whether reviewer lookups are failing in a way that polling
+// again will not fix. A token that authenticates but cannot read repositories
+// leaves every notification classified as "no reviewer data", so the cycle looks
+// clean while nothing is ever muted. Requiring a denial distinguishes that from a
+// network blip, and requiring every attempt to fail distinguishes it from a single
+// inaccessible repository.
+func (s CycleStats) ShouldStop() bool {
+	return s.LookupsAttempted > 0 && s.LookupsFailed == s.LookupsAttempted && s.LookupsDenied > 0
+}
+
 // FormatDaemonCycleSummary renders a one-line timestamped cycle summary.
-func FormatDaemonCycleSummary(now time.Time, scanned, actioned, errCount int, notModified bool, mode Mode) string {
+func FormatDaemonCycleSummary(now time.Time, stats CycleStats, mode Mode) string {
 	ts := now.UTC().Format(time.RFC3339)
-	if notModified {
+	if stats.NotModified {
 		return fmt.Sprintf("%s  cycle: not modified\n", ts)
 	}
-	return fmt.Sprintf("%s  cycle: %d scanned, %d %s, %d errors\n", ts, scanned, actioned, mode.ActionLabelLower(), errCount)
+	line := fmt.Sprintf("%s  cycle: %d scanned, %d %s, %d errors", ts, stats.Scanned, stats.Actioned, mode.ActionLabelLower(), stats.Errors)
+	if stats.LookupsFailed > 0 {
+		line += fmt.Sprintf(", %d/%d reviewer lookups failed", stats.LookupsFailed, stats.LookupsAttempted)
+	}
+	return line + "\n"
 }

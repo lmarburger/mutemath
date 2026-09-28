@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/lmarburger/mutemath/core"
@@ -75,9 +75,14 @@ func (c *GitHubClient) setStandardHeaders(req *http.Request) {
 
 // do executes an HTTP request with standard GitHub headers.
 // Retries once on 429 or 403 with Retry-After.
-func (c *GitHubClient) do(method, url string, body io.Reader) (*http.Response, error) {
+func (c *GitHubClient) do(method, url string, body []byte) (*http.Response, error) {
 	for attempt := range 2 {
-		req, err := http.NewRequest(method, url, body)
+		// A fresh reader per attempt: a retry would otherwise send an empty body.
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest(method, url, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -205,6 +210,11 @@ func (c *GitHubClient) ListUnreadNotifications(lastModified string) (*Notificati
 			return result, nil
 		}
 
+		if resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
+			return nil, fmt.Errorf("list notifications page %d: status %d: %w", page, resp.StatusCode, core.ErrAuth)
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
 			return nil, fmt.Errorf("list notifications page %d: unexpected status %d", page, resp.StatusCode)
@@ -244,7 +254,13 @@ func (c *GitHubClient) GetRequestedReviewers(subjectURL string) (*core.Reviewers
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
+		return nil, fmt.Errorf("get reviewers for %s/%s#%d: status %d: %w", ref.Owner, ref.Repo, ref.Number, resp.StatusCode, core.ErrAuth)
+	case http.StatusForbidden:
+		return nil, fmt.Errorf("get reviewers for %s/%s#%d: status %d: %w", ref.Owner, ref.Repo, ref.Number, resp.StatusCode, core.ErrAccess)
+	default:
 		return nil, fmt.Errorf("get reviewers for %s/%s#%d: unexpected status %d", ref.Owner, ref.Repo, ref.Number, resp.StatusCode)
 	}
 
@@ -290,7 +306,7 @@ func (c *GitHubClient) MarkThreadDone(threadID string) error {
 // IgnoreThread mutes/ignores a notification thread.
 func (c *GitHubClient) IgnoreThread(threadID string) error {
 	url := fmt.Sprintf("https://api.github.com/notifications/threads/%s/subscription", threadID)
-	body := strings.NewReader(`{"ignored":true}`)
+	body := []byte(`{"ignored":true}`)
 	resp, err := c.do("PUT", url, body)
 	if err != nil {
 		return fmt.Errorf("ignore thread %s: %w", threadID, err)
